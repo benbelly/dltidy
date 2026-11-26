@@ -174,3 +174,7 @@ To add a provider:
 The caps count calls and tokens, not dollars. The 6M-token monthly cap is about $0.60 of input on Haiku;
 on a more expensive model the same cap allows more spend. Give each provider its own token cap, or add a
 per-token price and cap dollars.
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).

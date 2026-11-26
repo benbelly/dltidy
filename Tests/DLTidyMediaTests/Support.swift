@@ -5,15 +5,20 @@ import Testing
 
 /// Forwards to the real runner and records every call.
 final class RecordingRunner: ToolRunning, @unchecked Sendable {
-    struct Call: Sendable { var tool: String; var args: [String]; var timeout: Duration }
+    struct Call: Sendable { var tool: String; var args: [String]; var timeout: Duration; var environment: [String: String] }
     private let lock = NSLock()
     private var _calls: [Call] = []
     var calls: [Call] { lock.withLock { _calls } }
     let inner = ToolRunner()
 
     func run(_ tool: String, _ args: [String], cwd: URL?, timeout: Duration, outputLimit: Int) async throws -> ToolResult {
-        lock.withLock { _calls.append(Call(tool: tool, args: args, timeout: timeout)) }
-        return try await inner.run(tool, args, cwd: cwd, timeout: timeout, outputLimit: outputLimit)
+        try await run(tool, args, cwd: cwd, environment: [:], timeout: timeout, outputLimit: outputLimit)
+    }
+
+    func run(_ tool: String, _ args: [String], cwd: URL?, environment: [String: String], timeout: Duration,
+             outputLimit: Int) async throws -> ToolResult {
+        lock.withLock { _calls.append(Call(tool: tool, args: args, timeout: timeout, environment: environment)) }
+        return try await inner.run(tool, args, cwd: cwd, environment: environment, timeout: timeout, outputLimit: outputLimit)
     }
 }
 
@@ -22,10 +27,20 @@ struct TimedOutRunner: ToolRunning {
     func run(_ tool: String, _ args: [String], cwd: URL?, timeout: Duration, outputLimit: Int) async throws -> ToolResult {
         try await ToolRunner().run("/bin/sh", ["-c", "exec sleep 30"], cwd: nil, timeout: .milliseconds(200), outputLimit: 1000)
     }
+
+    func run(_ tool: String, _ args: [String], cwd: URL?, environment: [String: String], timeout: Duration,
+             outputLimit: Int) async throws -> ToolResult {
+        try await run(tool, args, cwd: cwd, timeout: timeout, outputLimit: outputLimit)
+    }
 }
 
 struct MissingToolRunner: ToolRunning {
     func run(_ tool: String, _ args: [String], cwd: URL?, timeout: Duration, outputLimit: Int) async throws -> ToolResult {
+        throw ToolError.notFound(tool)
+    }
+
+    func run(_ tool: String, _ args: [String], cwd: URL?, environment: [String: String], timeout: Duration,
+             outputLimit: Int) async throws -> ToolResult {
         throw ToolError.notFound(tool)
     }
 }
@@ -159,4 +174,31 @@ func insertEXIF(into src: URL, output: URL) throws {
     seg += payload
     let data = try Data(contentsOf: src)
     try (data.prefix(2) + Data(seg) + data.dropFirst(2)).write(to: output)
+}
+
+/// A valid 1-bit grayscale PNG of any size, built from compressed zero rows without allocating the
+/// pixels (a "decompression bomb": a small file that declares a huge canvas).
+func bilevelPNG(width: Int, height: Int) throws -> Data {
+    func be32(_ v: UInt32) -> [UInt8] { [UInt8(v >> 24 & 0xff), UInt8(v >> 16 & 0xff), UInt8(v >> 8 & 0xff), UInt8(v & 0xff)] }
+    func crc32(_ bytes: [UInt8]) -> UInt32 {
+        var c: UInt32 = 0xffff_ffff
+        for b in bytes {
+            c ^= UInt32(b)
+            for _ in 0..<8 { c = (c & 1) != 0 ? 0xedb8_8320 ^ (c >> 1) : c >> 1 }
+        }
+        return ~c
+    }
+    func chunk(_ type: String, _ body: [UInt8]) -> [UInt8] {
+        let tb = Array(type.utf8) + body
+        return be32(UInt32(body.count)) + tb + be32(crc32(tb))
+    }
+    let raw = Data(count: height * (1 + (width + 7) / 8))   // filter byte 0 + zero pixels per row
+    let deflated = try (raw as NSData).compressed(using: .zlib) as Data
+    // Adler-32 of all-zero bytes: a stays 1, b grows by 1 per byte.
+    let adler = UInt32(raw.count % 65_521) << 16 | 1
+    let zlib = [0x78, 0x01] + [UInt8](deflated) + be32(adler)
+    let ihdr = be32(UInt32(width)) + be32(UInt32(height)) + [1, 0, 0, 0, 0]
+    var png: [UInt8] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+    png += chunk("IHDR", ihdr) + chunk("IDAT", zlib) + chunk("IEND", [])
+    return Data(png)
 }

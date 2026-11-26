@@ -25,7 +25,8 @@ final class TestClock: Clock, @unchecked Sendable {
 
 // MARK: - Fakes
 
-/// Media by extension. Content starting with "CORRUPT" does not decode. "dur=N" sets video length.
+/// Media by extension. Content starting with "CORRUPT" does not decode, "HUGE" is over the pixel
+/// cap. "dur=N" sets video length.
 final class FakeMedia: MediaProcessing, @unchecked Sendable {
     let converts = Locked<[(format: OutputFormat, input: String)]>([])
     let missingTool = Locked<String?>(nil)
@@ -37,6 +38,7 @@ final class FakeMedia: MediaProcessing, @unchecked Sendable {
     func probe(_ file: URL, sourceExtension: String) async throws -> MediaInfo {
         let text = String(decoding: (try Data(contentsOf: file)).prefix(200), as: UTF8.self)
         if text.hasPrefix("CORRUPT") { throw MediaError.unreadable("fake corrupt") }
+        if text.hasPrefix("HUGE") { throw MediaError.tooLarge("fake 30000x30000") }
         if let tool = missingTool.get { throw MediaError.toolMissing(tool) }
         if Self.stills.contains(sourceExtension) { return MediaInfo(kind: .stillImage, width: 100, height: 80) }
         if Self.videos.contains(sourceExtension) {

@@ -37,6 +37,7 @@ public final class Log: @unchecked Sendable {
     public func error(_ message: @autoclosure () -> String) { write(.error, message()) }
 
     public func write(_ level: Level, _ message: String) {
+        let message = Self.escape(message)
         lock.withLock {
             let line = "\(formatter.string(from: clock.now())) \(level.rawValue) \(message)\n"
             memory.append(line)
@@ -54,6 +55,29 @@ public final class Log: @unchecked Sendable {
                 self.handle = nil
             }
         }
+    }
+
+    /// One message is one line: control characters (C0, DEL, C1, U+2028/2029) become `\n`, `\r`,
+    /// `\t` or `\xHH` / `\u{HHHH}`, so a file name cannot start a forged log line.
+    static func escape(_ message: String) -> String {
+        guard message.unicodeScalars.contains(where: needsEscape) else { return message }
+        var out = ""
+        out.unicodeScalars.reserveCapacity(message.unicodeScalars.count + 8)
+        for u in message.unicodeScalars {
+            switch u {
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            case _ where u.value < 0x100 && needsEscape(u): out += String(format: "\\x%02x", u.value)
+            case _ where needsEscape(u): out += String(format: "\\u{%04x}", u.value)
+            default: out.unicodeScalars.append(u)
+            }
+        }
+        return out
+    }
+
+    private static func needsEscape(_ u: Unicode.Scalar) -> Bool {
+        u.value < 0x20 || (0x7f...0x9f).contains(u.value) || u.value == 0x2028 || u.value == 0x2029
     }
 
     private func open(_ url: URL) {

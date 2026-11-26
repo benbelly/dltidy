@@ -74,11 +74,22 @@ extension MediaProcessor {
     private func probeImage(_ file: URL, ext: String) async throws -> MediaInfo {
         let r = try await run("magick", ["identify", "-format", "%n %w %h %T\n", file.lastPathComponent],
                               cwd: file.deletingLastPathComponent(), timeout: Self.probeTimeout)
-        guard r.status == 0 else { throw MediaError.unreadable("identify: \(Self.tail(r.stderr))") }
+        guard r.status == 0 else {
+            // The policy's width/height limits refuse an oversized canvas before identify prints it.
+            let text = String(decoding: r.stderr, as: UTF8.self).lowercased()
+            if text.contains("exceeds limit") || text.contains("exceeds user limit") {
+                throw MediaError.tooLarge("identify: \(Self.tail(r.stderr))")
+            }
+            throw MediaError.unreadable("identify: \(Self.tail(r.stderr))")
+        }
         let lines = String(decoding: r.stdout, as: UTF8.self).split(separator: "\n")
         let rows = lines.map { $0.split(separator: " ").compactMap { Int($0) } }
         guard let first = rows.first, first.count == 4, first[1] > 0, first[2] > 0 else {
             throw MediaError.unreadable("identify output not parseable")
+        }
+        let (pixels, overflow) = first[1].multipliedReportingOverflow(by: first[2])
+        if overflow || pixels > Self.maxImagePixels {
+            throw MediaError.tooLarge("\(first[1])x\(first[2]) exceeds \(Self.maxImagePixels / 1_000_000) MP")
         }
         let animatable = ext == "gif" || ext == "webp"
         guard animatable, first[0] > 1 else {

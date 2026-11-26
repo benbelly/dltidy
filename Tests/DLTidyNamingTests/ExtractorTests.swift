@@ -381,3 +381,81 @@ struct ExtractorTests {
         #expect(ok == 7)
     }
 }
+
+/// A valid 1-bit grayscale PNG of any size, built from compressed zero rows without allocating the
+/// pixels (a "decompression bomb": a small file that declares a huge canvas).
+private func bilevelPNG(width: Int, height: Int) throws -> Data {
+    func be32(_ v: UInt32) -> [UInt8] { [UInt8(v >> 24 & 0xff), UInt8(v >> 16 & 0xff), UInt8(v >> 8 & 0xff), UInt8(v & 0xff)] }
+    func crc32(_ bytes: [UInt8]) -> UInt32 {
+        var c: UInt32 = 0xffff_ffff
+        for b in bytes {
+            c ^= UInt32(b)
+            for _ in 0..<8 { c = (c & 1) != 0 ? 0xedb8_8320 ^ (c >> 1) : c >> 1 }
+        }
+        return ~c
+    }
+    func chunk(_ type: String, _ body: [UInt8]) -> [UInt8] {
+        let tb = Array(type.utf8) + body
+        return be32(UInt32(body.count)) + tb + be32(crc32(tb))
+    }
+    let raw = Data(count: height * (1 + (width + 7) / 8))
+    let deflated = try (raw as NSData).compressed(using: .zlib) as Data
+    let adler = UInt32(raw.count % 65_521) << 16 | 1   // Adler-32 of all-zero bytes
+    let zlib = [0x78, 0x01] + [UInt8](deflated) + be32(adler)
+    let ihdr = be32(UInt32(width)) + be32(UInt32(height)) + [1, 0, 0, 0, 0]
+    var png: [UInt8] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+    png += chunk("IHDR", ihdr) + chunk("IDAT", zlib) + chunk("IEND", [])
+    return Data(png)
+}
+
+@Suite struct ExtractorLimitTests {
+    let extractor = ContentExtractor()
+
+    @Test func pixelCap() {
+        #expect(ContentExtractor.withinPixelCap(width: 10_000, height: 10_000))
+        #expect(!ContentExtractor.withinPixelCap(width: 10_001, height: 10_000))
+        #expect(!ContentExtractor.withinPixelCap(width: 0, height: 10))
+        #expect(!ContentExtractor.withinPixelCap(width: Int.max, height: 3))
+    }
+
+    @Test("images over 100 MP are not thumbnailed; 99 MP still is")
+    func oversizeImageIsNotDecoded() async throws {
+        let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
+        let bomb = d.appendingPathComponent("bomb.png")
+        try bilevelPNG(width: 30_000, height: 30_000).write(to: bomb)
+        let start = ContinuousClock.now
+        #expect(await extractor.extract(from: bomb, sourceExtension: "png") == nil)
+        #expect(ContinuousClock.now - start < .seconds(2))
+        let big = d.appendingPathComponent("big.png")
+        try bilevelPNG(width: 11_000, height: 10_000).write(to: big)
+        #expect(await extractor.extract(from: big, sourceExtension: "png") == nil)
+        let ok = d.appendingPathComponent("ok.png")
+        try bilevelPNG(width: 2_000, height: 1_000).write(to: ok)
+        guard case .image? = await extractor.extract(from: ok, sourceExtension: "png") else {
+            Issue.record("2 MP image not thumbnailed")
+            return
+        }
+    }
+
+    @Test("a 30 MB xlsx member is cut at the read cap and still yields text")
+    func hugeZipMemberIsCutAtReadCap() async throws {
+        let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
+        let xlsx = d.appendingPathComponent("big.xlsx")
+        let strings = "<sst>" + String(repeating: "<si><t>quarterly revenue</t></si>", count: 1_000_000) + "</sst>"
+        try await Fixtures.zip(["xl/sharedStrings.xml": strings,
+                                "xl/workbook.xml": #"<workbook><sheets><sheet name="Totals"/></sheets></workbook>"#],
+                               at: xlsx, in: d)
+        let start = ContinuousClock.now
+        let payload = await extractor.extract(from: xlsx, sourceExtension: "xlsx")
+        #expect(ContinuousClock.now - start < .seconds(5))
+        guard case .text(let s)? = payload else {
+            Issue.record("no text from a large xlsx")
+            return
+        }
+        #expect(s.hasPrefix("Sheets: Totals"))
+        #expect(s.contains("quarterly revenue"))
+        #expect(s.utf8.count <= ContentExtractor.maxTextBytes)
+    }
+}

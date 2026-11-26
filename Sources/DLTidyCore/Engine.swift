@@ -127,8 +127,10 @@ public actor Engine {
                 try ledger.db.run("DELETE FROM actions WHERE id = ?", a.id)
                 continue
             }
-            let target = config.watchDir.appendingPathComponent(a.to)
-            let landed = (try? FS.lstatEntry(target)).flatMap { $0 }.map { $0.inode == item.inode && $0.dev == item.dev } ?? false
+            var landed = false
+            if let target = watchURL(a.to, for: "recover \(a.kind)") {
+                landed = (try? FS.lstatEntry(target)).flatMap { $0 }.map { $0.inode == item.inode && $0.dev == item.dev } ?? false
+            }
             try ledger.db.transaction {
                 if landed {
                     try ledger.db.run("UPDATE actions SET status = 'done' WHERE id = ?", a.id)
@@ -194,6 +196,7 @@ public actor Engine {
 
         try processCommands()
         ledger.backupIfDue(dir: config.backupsDir, day: Period.day(nowDate), keep: config.backupsKept, log: log)
+        pruneIfDue()
 
         let entries: [DirEntry]
         do {
@@ -220,6 +223,32 @@ public actor Engine {
             try await advanceDeferred()
         } catch is FuseTripped {
             return
+        }
+    }
+
+    // MARK: - Retention
+
+    /// Once per day, after the backup: deletes ledger rows past their retention (see `Config`).
+    /// Each cutoff is clamped so no row a live check still reads is deleted: api_calls of the current
+    /// month (day/month caps), actions of the last hour (fuse), starts within the crash-loop window.
+    func pruneIfDue() {
+        let day = Period.day(nowDate)
+        guard ledger.meta("last_prune_day") != day else { return }
+        let t = now
+        let monthStart = Calendar.current.dateInterval(of: .month, for: nowDate)?.start.timeIntervalSince1970 ?? t
+        do {
+            let n = try ledger.prune(
+                day: day,
+                apiCallsBefore: min(t - config.apiCallRetention, monthStart),
+                actionsBefore: min(t - config.actionRetention, t - 3_600),
+                commandsBefore: t - config.finishedCommandRetention,
+                noticesBefore: t - config.clearedNoticeRetention,
+                startsBefore: min(t - config.startRetention, t - config.crashLoopWindow),
+                missingItemsBefore: t - config.missingItemRetention)
+            log.info("ledger retention: removed \(n.apiCalls) api_calls, \(n.actions) actions, \(n.commands) commands, "
+                     + "\(n.notices) notices, \(n.starts) starts, \(n.items) items")
+        } catch {
+            log.error("ledger retention failed: \(error)")
         }
     }
 
@@ -356,7 +385,9 @@ public actor Engine {
             var sha = "-"
             if let size = it.size, size <= config.preexistingHashMaxFileBytes {
                 bytes += size
-                sha = (try? FS.sha256(config.watchDir.appendingPathComponent(it.path), expectInode: it.inode)) ?? "-"
+                if FS.isSafeName(it.path) {
+                    sha = (try? FS.sha256(config.watchDir.appendingPathComponent(it.path), expectInode: it.inode)) ?? "-"
+                }
             }
             _ = try? ledger.db.run("UPDATE items SET sha256 = ? WHERE id = ?", sha, it.id)
         }
@@ -386,18 +417,31 @@ public actor Engine {
         throw FuseTripped()
     }
 
-    /// Renames a file inside the watch dir with RENAME_EXCL. Returns false when the target exists
-    /// or the source vanished (nothing written).
+    /// URL of a ledger name inside the watch dir, or nil (logged) when the name is not one safe path
+    /// component. The ledger is writable by any process of the user, so its names are untrusted.
+    func watchURL(_ name: String, for purpose: String) -> URL? {
+        guard FS.isSafeName(name) else {
+            log.warn("unsafe name in ledger, skipped (\(purpose)): \(name)")
+            return nil
+        }
+        return config.watchDir.appendingPathComponent(name)
+    }
+
+    /// Renames a file inside the watch dir with RENAME_EXCL, relative to an fd of the watch dir.
+    /// Returns false when a name is unsafe, the target exists or the source vanished (nothing written).
     func performRename(_ item: Item, to target: String, kind: ActionEvent.Kind, key: String) throws -> Bool {
-        try checkFuse(key)
         let from = item.path
+        guard watchURL(from, for: "\(kind.rawValue) from") != nil, watchURL(target, for: "\(kind.rawValue) to") != nil else {
+            return false
+        }
+        try checkFuse(key)
         let t = now
         let actionID = try ledger.db.transaction {
             try ledger.insertAction(at: t, itemID: item.id, kind: kind.rawValue, key: key, from: from, to: target)
         }
         try env.failpoints.hit("before-rename")
         do {
-            try FS.renameExclusive(config.watchDir.appendingPathComponent(from), to: config.watchDir.appendingPathComponent(target))
+            try FS.renameExclusive(from, in: config.watchDir, to: target, in: config.watchDir)
         } catch let f as POSIXFailure {
             try ledger.db.run("DELETE FROM actions WHERE id = ?", actionID)
             log.warn("rename \(from) -> \(target) not done: \(f)")

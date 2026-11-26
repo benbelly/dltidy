@@ -52,6 +52,8 @@ public enum MediaError: Error, Sendable, Equatable {
     case notMedia
     /// The file looks like media but does not decode (readiness rule 8: retry later).
     case unreadable(String)
+    /// The file declares dimensions above the decode cap. Final: no retry.
+    case tooLarge(String)
     /// A required external tool is not on PATH.
     case toolMissing(String)
     case timeout(String)
@@ -64,7 +66,7 @@ public enum MediaError: Error, Sendable, Equatable {
 
 public protocol MediaProcessing: Sendable {
     /// Inspects the staged clone. Throws `.notMedia` for non-media files, `.unreadable` for media
-    /// that fails to decode.
+    /// that fails to decode, `.tooLarge` for images above the pixel cap.
     func probe(_ file: URL, sourceExtension: String) async throws -> MediaInfo
 
     /// Outputs to create, in the order `convert` must be called. Pure.

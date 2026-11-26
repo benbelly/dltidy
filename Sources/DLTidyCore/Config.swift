@@ -71,6 +71,16 @@ public struct Config: Sendable {
 
     // Ledger and log
     public var backupsKept = 7
+    /// Daily retention, run after the backup in one transaction. Each interval is clamped to the
+    /// window that still reads the table: a calendar month (caps), `crashLoopWindow` (starts),
+    /// one hour (fuse).
+    public var apiCallRetention: TimeInterval = 62 * 86_400
+    public var actionRetention: TimeInterval = 90 * 86_400
+    public var finishedCommandRetention: TimeInterval = 7 * 86_400
+    public var clearedNoticeRetention: TimeInterval = 7 * 86_400
+    public var startRetention: TimeInterval = 7 * 86_400
+    /// Items whose file has been missing this long are dropped, unless another kept row refers to them.
+    public var missingItemRetention: TimeInterval = 365 * 86_400
     public var logMaxBytes = 5 << 20
     public var logFilesKept = 5
 

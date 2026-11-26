@@ -25,8 +25,9 @@ bundle: build
 sign: bundle
 	KC=$$(Support/make-cert.sh) || exit 1; \
 	  HASH=$$(security find-identity -p codesigning "$$KC" | awk -v n='"$(CERT_NAME)"' '$$0 ~ n {print $$2; exit}'); \
-	  test -n "$$HASH" || { echo "signing identity not found"; exit 1; }; \
-	  codesign --force --keychain "$$KC" --sign "$$HASH" --identifier local.dltidy --timestamp=none "$(BUILD_APP)"
+	  test -n "$$HASH" || { security lock-keychain "$$KC"; echo "signing identity not found"; exit 1; }; \
+	  codesign --force --options runtime --keychain "$$KC" --sign "$$HASH" --identifier local.dltidy --timestamp=none "$(BUILD_APP)"; \
+	  RC=$$?; security lock-keychain "$$KC"; exit $$RC
 	codesign -d -r- "$(BUILD_APP)" 2>&1 | grep designated
 
 install: sign

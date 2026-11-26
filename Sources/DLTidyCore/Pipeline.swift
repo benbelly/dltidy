@@ -81,7 +81,7 @@ extension Engine {
     /// Clones the file at the item's ledger path into staging after checking that it is still the
     /// same inode with the same size and mtime.
     func cloneOriginal(_ item: Item) -> CloneResult {
-        let src = config.watchDir.appendingPathComponent(item.path)
+        guard let src = watchURL(item.path, for: "clone") else { return .missing }
         guard let cur = try? FS.lstatEntry(src), cur.kind == .regular, cur.dev == item.dev, cur.inode == item.inode else {
             return .missing
         }
@@ -196,6 +196,11 @@ extension Engine {
         } catch MediaError.toolMissing(let tool) {
             raiseToolMissing(tool)
             try ledger.db.run("UPDATE items SET next_attempt_at = ? WHERE id = ?", now + config.toolMissingRetry, m.id)
+        } catch MediaError.tooLarge(let why) {
+            FS.removeTree(stagingDir(m.id))
+            try ledger.db.run("UPDATE items SET state = 'failed_unreadable', note = ?, updated_at = ? WHERE id = ?",
+                              "too large: \(why)", now, m.id)
+            log.warn("failed_unreadable: \(m.path) (too large: \(why)); no retry, no API call")
         } catch {
             let failures = m.decodeFailures + 1
             FS.removeTree(stagingDir(m.id))
@@ -233,7 +238,7 @@ extension Engine {
             // Re-read: the original may have been renamed by the user since the pass began.
             guard let cur = try ledger.item(m.id) else { return }
             guard verifyIdentity(cur) else {
-                let gone = (try? FS.lstatEntry(config.watchDir.appendingPathComponent(cur.path))) == nil
+                let gone = watchURL(cur.path, for: "output check").map { (try? FS.lstatEntry($0)) == nil } ?? true
                 try ledger.setState(m.id, gone ? .abandoned : .skippedChanged, note: "original changed or gone before output", now: now)
                 log.info("\(gone ? "abandoned" : "skipped_changed"): \(cur.path); no further outputs")
                 FS.removeTree(stagingDir(m.id))
@@ -309,7 +314,7 @@ extension Engine {
 
     /// True when the original is at its ledger path with the inode, size and mtime recorded at staging.
     func verifyIdentity(_ item: Item) -> Bool {
-        guard let cur = try? FS.lstatEntry(config.watchDir.appendingPathComponent(item.path)) else { return false }
+        guard let url = watchURL(item.path, for: "identity"), let cur = try? FS.lstatEntry(url) else { return false }
         return cur.kind == .regular && cur.dev == item.dev && cur.inode == item.inode && cur.size == item.size && cur.mtimeNs == item.mtimeNs
     }
 
@@ -323,6 +328,10 @@ extension Engine {
     /// Output placement: xattr + ledger row committed first, then an atomic no-overwrite move.
     func place(_ m: Item, format: OutputFormat, staged: URL, target: String) throws {
         let key = "place:\(m.id):\(format.rawValue)"
+        guard watchURL(target, for: "place") != nil else {
+            try? FileManager.default.removeItem(at: staged)
+            return
+        }
         try checkFuse(key)
         try FS.setXattr(staged, name: FS.roleXattr, value: "output")
         try FS.setXattr(staged, name: FS.itemXattr, value: String(m.id))
@@ -341,7 +350,7 @@ extension Engine {
         }
         try env.failpoints.hit("before-place")
         do {
-            try FS.renameExclusive(staged, to: config.watchDir.appendingPathComponent(target))
+            try FS.renameExclusive(staged.lastPathComponent, in: staged.deletingLastPathComponent(), to: target, in: config.watchDir)
         } catch let f as POSIXFailure {
             try ledger.db.transaction {
                 try ledger.db.run("DELETE FROM actions WHERE id = ?", actionID)

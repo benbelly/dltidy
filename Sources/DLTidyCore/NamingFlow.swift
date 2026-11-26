@@ -119,7 +119,17 @@ extension Engine {
         case .missing: return .keep("original gone")
         case .changed: return .keep("original changed")
         }
+        // Extraction decodes untrusted content in-process. The main path counts it in work_starts per
+        // group pass; a deferred attempt counts here, so a crash in the extractor poisons the item
+        // after `poisonThreshold` attempts instead of looping across restarts.
+        if deferred {
+            try ledger.db.run("UPDATE items SET work_starts = work_starts + 1 WHERE id = ?", leader.id)
+        }
+        try env.failpoints.hit("during-extract")
         let payload = await env.extractor.extract(from: clone, sourceExtension: leader.ext.lowercased())
+        if deferred {
+            try ledger.db.run("UPDATE items SET work_starts = 0 WHERE id = ?", leader.id)
+        }
         if deferred && !leader.state.isActiveOriginal { FS.removeTree(stagingDir(leader.id)) }
         guard let payload else { return .keep("content not nameable") }
         let est: Int
@@ -233,7 +243,7 @@ extension Engine {
                 let key = "rename:\(o.id)"
                 if try ledger.actionExists(key: key) { continue }
                 guard o.missingSince == nil, o.path == o.assignedName, let format = o.format else { continue }
-                guard let cur = try FS.lstatEntry(config.watchDir.appendingPathComponent(o.path)), cur.inode == o.inode else { continue }
+                guard let url = watchURL(o.path, for: "rename output"), let cur = try FS.lstatEntry(url), cur.inode == o.inode else { continue }
                 _ = try performRename(o, to: "\(stem).\(format)", kind: .rename, key: key)
             }
         }
@@ -257,6 +267,14 @@ extension Engine {
             let leader = primary(members)
             if leader.nameStatus == .renaming {
                 try finishRename(g)
+                continue
+            }
+            if leader.workStarts >= config.poisonThreshold {
+                try ledger.setState(leader.id, .failedPoison,
+                                    note: "deferred naming: \(leader.workStarts) starts without completion", now: now)
+                try ledger.setGroupNameStatus(g, .keep, now: now)
+                FS.removeTree(stagingDir(leader.id))
+                log.error("failed_poison: \(leader.path) #\(leader.id) after \(leader.workStarts) unfinished deferred naming starts; name kept")
                 continue
             }
             let firstSeen = members.map(\.firstSeen).min() ?? leader.firstSeen
@@ -294,6 +312,7 @@ extension Engine {
     func undo(_ target: String?) throws -> String {
         let groupID: Int64?
         if let target, !target.isEmpty {
+            guard FS.isSafeName(target) else { return "not a file name: \(target)" }
             guard let item = try ledger.items(where: """
                 path = ? COLLATE NOCASE AND missing_since IS NULL AND role IN ('original', 'output') ORDER BY id DESC LIMIT 1
                 """, [target]).first else { return "no file named \(target) in the ledger" }
@@ -313,15 +332,34 @@ extension Engine {
         let members = try ledger.group(g)
         guard members.first?.nameStatus == .renamed else { return "group #\(g) was not renamed by dltidy" }
         var restored: [String] = []
+        var skipped = 0
         for m in members where m.missingSince == nil && m.path == m.assignedName && m.path != m.originalName {
+            // Names come from the ledger, which any process of the user can write: each one must be a
+            // single component, and each file must still be the one dltidy recorded.
+            guard FS.isSafeName(m.originalName) else {
+                log.warn("undo skipped for #\(m.id): unsafe original name \(m.originalName)")
+                skipped += 1
+                continue
+            }
+            guard verifyIdentity(m) else {
+                log.warn("undo skipped for #\(m.id) \(m.path): file differs from the ledger record")
+                skipped += 1
+                continue
+            }
             for o in try ledger.outputs(parent: m.id) where o.state == .placed && o.missingSince == nil && o.path == o.assignedName {
                 guard let format = o.format else { continue }
+                guard verifyIdentity(o) else {
+                    log.warn("undo skipped for output #\(o.id) \(o.path): file differs from the ledger record")
+                    skipped += 1
+                    continue
+                }
                 let back = "\(m.originalName.fileStem).\(format)"
-                if try performRename(o, to: back, kind: .undo, key: "undo:\(o.id)") { restored.append(back) }
+                if try performRename(o, to: back, kind: .undo, key: "undo:\(o.id)") { restored.append(back) } else { skipped += 1 }
             }
-            if try performRename(m, to: m.originalName, kind: .undo, key: "undo:\(m.id)") { restored.append(m.originalName) }
+            if try performRename(m, to: m.originalName, kind: .undo, key: "undo:\(m.id)") { restored.append(m.originalName) } else { skipped += 1 }
         }
         try ledger.setGroupNameStatus(g, .undone, now: now)
-        return restored.isEmpty ? "nothing restored (files moved or renamed)" : "restored: " + restored.joined(separator: ", ")
+        let note = skipped > 0 ? " (\(skipped) skipped; see the log)" : ""
+        return (restored.isEmpty ? "nothing restored (files moved or renamed)" : "restored: " + restored.joined(separator: ", ")) + note
     }
 }

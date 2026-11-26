@@ -109,6 +109,31 @@ public enum FS {
         }
     }
 
+    /// True for a single path component: non-empty, not `.` or `..`, no `/`, no NUL, no leading dot.
+    /// Every name from the ledger passes this before it reaches a file-system call in the watch dir.
+    public static func isSafeName(_ name: String) -> Bool {
+        !name.isEmpty && name != "." && name != ".." && !name.hasPrefix(".")
+            && !name.contains("/") && !name.utf8.contains(0)
+    }
+
+    /// Renames `srcName` in `srcDir` to `dstName` in `dstDir` with RENAME_EXCL, relative to open
+    /// fds of the two directories. Both names must pass `isSafeName`, so neither can leave its
+    /// directory. Throws `POSIXFailure` (EINVAL for an unsafe name, EEXIST when the target exists).
+    public static func renameExclusive(_ srcName: String, in srcDir: URL, to dstName: String, in dstDir: URL) throws {
+        for name in [srcName, dstName] where !isSafeName(name) {
+            throw POSIXFailure(operation: "name-check", path: name, code: EINVAL)
+        }
+        let srcFD = open(srcDir.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard srcFD >= 0 else { throw POSIXFailure(operation: "open", path: srcDir.path, code: errno) }
+        defer { close(srcFD) }
+        let dstFD = open(dstDir.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard dstFD >= 0 else { throw POSIXFailure(operation: "open", path: dstDir.path, code: errno) }
+        defer { close(dstFD) }
+        if renameatx_np(srcFD, srcName, dstFD, dstName, UInt32(RENAME_EXCL)) != 0 {
+            throw POSIXFailure(operation: "renameatx_np", path: "\(srcName) -> \(dstName)", code: errno)
+        }
+    }
+
     public static func setXattr(_ url: URL, name: String, value: String) throws {
         let data = Array(value.utf8)
         let rc = data.withUnsafeBytes { setxattr(url.path, name, $0.baseAddress, $0.count, 0, XATTR_NOFOLLOW) }

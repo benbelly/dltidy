@@ -20,7 +20,8 @@ make install                            # build, sign, load the LaunchAgent
 pbpaste | ~/.local/bin/dltidy set-key   # with the key on the clipboard
 ```
 
-Allow Downloads access if prompted. Signing uses a dedicated keychain, so install runs without prompts.
+Allow Downloads access if prompted. Signing uses a dedicated keychain; `make install` asks for its password
+and locks it after signing, so no other process can sign as dltidy.
 `make uninstall [PURGE=1]` removes it (`PURGE=1` also removes state, logs and key).
 
 ## Commands
@@ -62,6 +63,17 @@ unavailable, files are converted now and renamed if the API returns within 24 h.
 
 **Failures** produce one notification per incident. The daemon never exits on errors, so launchd cannot
 restart-loop it.
+
+## What leaves your machine
+
+Only naming requests to the Anthropic API. Files with meaningful names send nothing.
+
+- **Unclear name**: the filename stem, in a classification call.
+- **Generic name**: the original filename plus a 768 px JPEG thumbnail (image, video mid-frame, PDF page
+  without text) or up to 2 KB of extracted text (PDF, docx/rtf/odt, xlsx/pptx strings, csv, txt).
+  Generic PDF names from bank or payroll portals, such as `document (1).pdf` or `download.pdf`, qualify.
+
+No EXIF or GPS data is sent; the thumbnail is re-encoded from pixels.
 
 ## Development
 

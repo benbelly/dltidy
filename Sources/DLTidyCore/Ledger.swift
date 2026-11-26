@@ -137,6 +137,10 @@ final class Ledger {
     init(url: URL) throws {
         self.url = url
         db = try Database(path: url.path)
+        // A new ledger reclaims pruned pages with `PRAGMA incremental_vacuum` (set before any table).
+        if try db.scalarInt("SELECT COUNT(*) FROM sqlite_master") == 0 {
+            try db.execute("PRAGMA auto_vacuum=INCREMENTAL")
+        }
         try db.execute("PRAGMA journal_mode=WAL")
         try db.execute("PRAGMA synchronous=FULL")
         try db.execute("PRAGMA foreign_keys=OFF")
@@ -268,6 +272,53 @@ final class Ledger {
         } catch {
             log.error("ledger backup failed: \(error)")
         }
+    }
+
+    // MARK: retention
+
+    struct PruneCounts: Equatable {
+        var apiCalls = 0, actions = 0, commands = 0, notices = 0, starts = 0, items = 0
+        var total: Int { apiCalls + actions + commands + notices + starts + items }
+    }
+
+    /// Deletes rows past their retention and records `day` as done, in one transaction; then, when
+    /// auto_vacuum is on, returns free pages, and last truncates the WAL. Never runs a full VACUUM.
+    /// Cutoffs are epoch seconds.
+    func prune(day: String, apiCallsBefore: Double, actionsBefore: Double, commandsBefore: Double, noticesBefore: Double,
+               startsBefore: Double, missingItemsBefore: Double) throws -> PruneCounts {
+        var n = PruneCounts()
+        try db.transaction {
+            // Only finished calls: a 'reserved' row is a request in flight (recoverAfterRestart settles it).
+            n.apiCalls = try db.run("DELETE FROM api_calls WHERE at < ? AND status != 'reserved'", apiCallsBefore)
+            // Only done actions: an 'intent' row is resolved by recoverActions at the next start.
+            n.actions = try db.run("DELETE FROM actions WHERE at < ? AND status = 'done'", actionsBefore)
+            n.commands = try db.run("DELETE FROM commands WHERE status = 'done' AND COALESCE(done_at, at) < ?", commandsBefore)
+            n.notices = try db.run("DELETE FROM notices WHERE active = 0 AND COALESCE(last_at, first_at, 0) < ?", noticesBefore)
+            n.starts = try db.run("DELETE FROM starts WHERE at < ?", startsBefore)
+            // Items: drop long-missing rows that no kept row refers to (outputs → parent_id, originals →
+            // group_id, remaining actions and api_calls → item/group). The highest id is always kept so
+            // SQLite never reuses an item id (ids appear in action keys and output xattrs).
+            n.items = try db.run("""
+                WITH RECURSIVE
+                  edges(src, dst) AS (
+                    SELECT id, parent_id FROM items WHERE parent_id IS NOT NULL
+                    UNION ALL SELECT id, group_id FROM items WHERE group_id IS NOT NULL),
+                  keep(id) AS (
+                    SELECT id FROM items WHERE missing_since IS NULL OR missing_since >= ?1
+                    UNION SELECT MAX(id) FROM items
+                    UNION SELECT item_id FROM actions WHERE item_id IS NOT NULL
+                    UNION SELECT item_id FROM api_calls WHERE item_id IS NOT NULL
+                    UNION SELECT group_id FROM api_calls WHERE group_id IS NOT NULL
+                    UNION SELECT e.dst FROM edges e JOIN keep k ON e.src = k.id)
+                DELETE FROM items WHERE missing_since < ?1 AND id NOT IN (SELECT id FROM keep WHERE id IS NOT NULL)
+                """, missingItemsBefore)
+            try setMeta("last_prune_day", day)
+        }
+        if (try db.scalarInt("PRAGMA auto_vacuum") ?? 0) != 0 {
+            try db.execute("PRAGMA incremental_vacuum")
+        }
+        _ = try db.query("PRAGMA wal_checkpoint(TRUNCATE)") { _ in () }
+        return n
     }
 
     static func newestGoodBackup(in dir: URL) -> URL? {

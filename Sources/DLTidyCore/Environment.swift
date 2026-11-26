@@ -87,7 +87,7 @@ public struct SimulatedCrash: Error, Equatable, Sendable {
 /// `DLTIDY_FAILPOINT=<name>` calls `abort()`; in tests it throws `SimulatedCrash`.
 public final class Failpoints: @unchecked Sendable {
     public static let all = [
-        "after-stage", "after-probe", "after-reserve", "after-request", "after-name-decided",
+        "after-stage", "after-probe", "during-extract", "after-reserve", "after-request", "after-name-decided",
         "before-rename", "after-rename", "after-convert", "before-place", "after-place", "after-group",
     ]
 

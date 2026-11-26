@@ -1,27 +1,34 @@
 #!/bin/bash
 # Creates (once) a self-signed code-signing identity in a dedicated keychain and unlocks it.
-# The keychain password is generated and kept in a 0600 file, and the key's partition list
-# allows codesign, so signing never shows a prompt and works from a headless shell.
+# The keychain password is the user's choice and is never stored: `make install` asks for it,
+# and the keychain locks again after 5 minutes or on sleep. Other processes running as the user
+# cannot sign as dltidy (and inherit its Downloads grant) without that password.
 # A stable identity keeps the TCC (Downloads) grant and Keychain ACL across rebuilds.
-# Prints the keychain path on stdout. Idempotent.
+# Prints the keychain path on stdout; prompts go to the terminal. Idempotent.
 set -euo pipefail
 
 NAME="${DLTIDY_CERT_NAME:-dltidy Local Signing}"
 DIR="$HOME/Library/Application Support/dltidy-signing"
 KC="$DIR/signing.keychain-db"
-PWFILE="$DIR/keychain-password"
+OLD_PWFILE="$DIR/keychain-password"   # written by earlier versions; migrated and removed below
 
 mkdir -p "$DIR"
 chmod 700 "$DIR"
 
 if [[ ! -f "$KC" ]]; then
-  uuidgen >"$PWFILE"
-  chmod 600 "$PWFILE"
-  security create-keychain -p "$(cat "$PWFILE")" "$KC" >&2
-  security set-keychain-settings "$KC" >&2   # no auto-lock timeout
+  echo "make-cert: choose a password for the dltidy signing keychain (asked at each install)" >&2
+  security create-keychain "$KC" >&2
 fi
-PW="$(cat "$PWFILE")"
-security unlock-keychain -p "$PW" "$KC" >&2
+
+if [[ -f "$OLD_PWFILE" ]]; then
+  echo "make-cert: set a new password for the dltidy signing keychain; the stored one is being removed" >&2
+  security set-keychain-password -o "$(cat "$OLD_PWFILE")" "$KC" >&2
+  rm -P "$OLD_PWFILE" 2>/dev/null || rm -f "$OLD_PWFILE"
+fi
+
+security set-keychain-settings -l -u -t 300 "$KC" >&2   # lock on sleep and after 5 min
+echo "make-cert: unlock the dltidy signing keychain" >&2
+security unlock-keychain "$KC" >&2
 
 # codesign finds identities only in the user search list; append ours, keep the rest.
 if ! security list-keychains -d user | grep -qF "$KC"; then
@@ -55,7 +62,8 @@ EOF
   /usr/bin/openssl pkcs12 -export -inkey "$TMP/key.pem" -in "$TMP/cert.pem" \
     -name "$NAME" -out "$TMP/id.p12" -passout "pass:$P12PASS"
   security import "$TMP/id.p12" -k "$KC" -P "$P12PASS" -T /usr/bin/codesign >&2
-  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$PW" "$KC" >/dev/null
+  echo "make-cert: allow codesign to use the key (keychain password again)" >&2
+  security set-key-partition-list -S apple-tool:,apple: -s "$KC" >/dev/null
   echo "make-cert: created identity '$NAME' in $KC" >&2
 fi
 

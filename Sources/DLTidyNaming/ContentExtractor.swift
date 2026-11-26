@@ -21,6 +21,8 @@ public struct ContentExtractor: ContentExtracting {
     static let maxImageBytes = 300 * 1024
     static let longEdge = 768
     static let timeoutSeconds: Double = 10
+    /// Images above this many pixels are not decoded (a small file can declare a huge canvas).
+    static let maxImagePixels = 100_000_000
 
     private let tools: any ToolRunning
 
@@ -114,7 +116,7 @@ public struct ContentExtractor: ContentExtracting {
     private static func textutilPayload(_ file: URL, tools: any ToolRunning) async -> NamingPayload? {
         guard let r = try? await tools.run("/usr/bin/textutil", ["-convert", "txt", "-stdout", file.path],
                                            cwd: nil, timeout: .seconds(9), outputLimit: readCap),
-              r.succeeded, let s = decode(r.stdout) else { return nil }
+              r.succeeded || r.outputTruncated, let s = decode(r.stdout) else { return nil }
         let text = truncateUTF8(collapse(s))
         return text.isEmpty ? nil : .text(text)
     }
@@ -124,7 +126,7 @@ public struct ContentExtractor: ContentExtracting {
     private static func unzip(_ file: URL, _ member: String, tools: any ToolRunning) async -> String? {
         guard let r = try? await tools.run("/usr/bin/unzip", ["-p", file.path, member],
                                            cwd: nil, timeout: .seconds(9), outputLimit: readCap),
-              r.succeeded else { return nil }
+              r.succeeded || r.outputTruncated else { return nil }
         return decode(r.stdout)
     }
 
@@ -198,10 +200,21 @@ public struct ContentExtractor: ContentExtracting {
 
     // MARK: Images
 
+    /// True for positive dimensions whose product is at most `maxImagePixels`.
+    static func withinPixelCap(width: Int, height: Int) -> Bool {
+        guard width > 0, height > 0 else { return false }
+        let (area, overflow) = width.multipliedReportingOverflow(by: height)
+        return !overflow && area <= maxImagePixels
+    }
+
     private static func imagePayload(_ file: URL) -> NamingPayload? {
         let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let src = CGImageSourceCreateWithURL(file as CFURL, sourceOptions),
               CGImageSourceGetCount(src) > 0 else { return nil }
+        guard let props = CGImageSourceCopyPropertiesAtIndex(src, 0, sourceOptions) as? [CFString: Any],
+              let w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+              let h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+              withinPixelCap(width: w, height: h) else { return nil }
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,   // applies EXIF orientation

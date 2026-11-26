@@ -27,6 +27,8 @@ public struct MediaProcessor: MediaProcessing {
     static let maxSourceSeconds = 2.0 * 3600
     static let longEncodeSeconds = 60.0
     static let gifMaxDuration = 10.0
+    /// Stills above this many pixels are refused at probe (a small file can declare a huge canvas).
+    static let maxImagePixels = 100_000_000
 
     let tools: any ToolRunning
     let maxGIFBytes: Int64
@@ -66,15 +68,19 @@ public struct MediaProcessor: MediaProcessing {
 
     // MARK: - Tool helper
 
-    /// Runs a tool. Maps a missing tool to `.toolMissing` and a timeout to `.timeout`.
+    /// Runs a tool. Every `magick` call runs under `MagickPolicy`. Maps a missing tool to
+    /// `.toolMissing` and a timeout to `.timeout`.
     func run(_ tool: String, _ args: [String], cwd: URL? = nil, timeout: Duration, outputLimit: Int = 1 << 20) async throws -> ToolResult {
+        let environment = tool == "magick" ? try MagickPolicy.environment() : [:]
         let result: ToolResult
         do {
-            result = try await tools.run(tool, args, cwd: cwd, timeout: timeout, outputLimit: outputLimit)
+            result = try await tools.run(tool, args, cwd: cwd, environment: environment, timeout: timeout, outputLimit: outputLimit)
         } catch let ToolError.notFound(name) {
             throw MediaError.toolMissing(name)
         } catch let ToolError.spawnFailed(name, code) {
             throw MediaError.failed("cannot start \(name): errno \(code)")
+        } catch let ToolError.environmentUnsupported(name) {
+            throw MediaError.failed("tool runner cannot apply the environment for \(name)")
         }
         if result.timedOut { throw MediaError.timeout("\(tool) exceeded its time limit") }
         return result

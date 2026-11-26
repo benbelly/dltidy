@@ -356,6 +356,13 @@ import Testing
                 }
                 return try await inner.run(tool, args, cwd: cwd, timeout: timeout, outputLimit: outputLimit)
             }
+            func run(_ tool: String, _ args: [String], cwd: URL?, environment: [String: String], timeout: Duration,
+                     outputLimit: Int) async throws -> ToolResult {
+                if !environment.isEmpty {
+                    return try await inner.run(tool, args, cwd: cwd, environment: environment, timeout: timeout, outputLimit: outputLimit)
+                }
+                return try await run(tool, args, cwd: cwd, timeout: timeout, outputLimit: outputLimit)
+            }
         }
         let f = try await FixtureStore.shared.get()
         let (dir, outs) = try await run(f.animWEBP, ext: "webp", formats: [.mp4], tools: FailFirstFfmpeg())
@@ -378,5 +385,154 @@ import Testing
         try await p.convert(input: input, info: info, to: .mp4, output: out, workDir: dir, allowLongEncode: true)
         let tags = try await exec("ffprobe", ["-v", "error", "-show_entries", "format_tags", out.path])
         #expect(tags.contains("37.3349"), "format tags: \(tags)")
+    }
+}
+
+@Suite struct ImageMagickPolicyTests {
+    /// Probe, then convert to every planned still output; returns the outputs' identify formats.
+    func probeAndConvert(_ input: URL, ext: String, tools: any ToolRunning) async throws -> [String] {
+        let p = MediaProcessor(tools: tools)
+        let info = try await p.probe(input, sourceExtension: ext)
+        #expect(info.kind == .stillImage)
+        var formats: [String] = []
+        for format in p.plannedOutputs(info: info, sourceExtension: ext, isLivePhotoVideo: false) {
+            let out = input.deletingLastPathComponent().appendingPathComponent("out.\(format.rawValue)")
+            try await p.convert(input: input, info: info, to: format, output: out,
+                                workDir: input.deletingLastPathComponent(), allowLongEncode: true)
+            formats.append(try await identify(out, "%m"))
+        }
+        return formats
+    }
+
+    @Test("SVG and PostScript named .jpg are rejected; no output copies a local image")
+    func svgAndPostScriptAsJpgRejected() async throws {
+        let dir = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let secret = dir.appendingPathComponent("private.png")
+        try await exec("magick", ["-size", "64x32", "xc:red", secret.path])
+        let payloads = [
+            "svg-relative": """
+                <?xml version="1.0"?><svg width="64" height="32" xmlns="http://www.w3.org/2000/svg" \
+                xmlns:xlink="http://www.w3.org/1999/xlink"><image xlink:href="private.png" width="64" height="32"/></svg>
+                """,
+            "svg-absolute": """
+                <?xml version="1.0"?><svg width="64" height="32" xmlns="http://www.w3.org/2000/svg" \
+                xmlns:xlink="http://www.w3.org/1999/xlink"><image xlink:href="\(secret.path)" width="64" height="32"/></svg>
+                """,
+            "postscript": "%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 100 100\nnewpath 0 0 moveto 100 0 lineto 100 100 lineto closepath fill\nshowpage\n",
+        ]
+        let p = MediaProcessor()
+        for (name, body) in payloads {
+            let stage = dir.appendingPathComponent(name, isDirectory: true)
+            try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: secret, to: stage.appendingPathComponent("private.png"))
+            let input = stage.appendingPathComponent("in.jpg")
+            try Data(body.utf8).write(to: input)
+            do {
+                _ = try await p.probe(input, sourceExtension: "jpg")
+                Issue.record("\(name): probe accepted it")
+            } catch MediaError.unreadable {
+            } catch MediaError.notMedia {
+            }
+            // Even without the probe, conversion must not decode it.
+            let out = stage.appendingPathComponent("out.png")
+            await #expect(throws: (any Error).self, "\(name): converted") {
+                try await p.convert(input: input, info: MediaInfo(kind: .stillImage, width: 64, height: 32), to: .png,
+                                    output: out, workDir: stage, allowLongEncode: true)
+            }
+            #expect(!FileManager.default.fileExists(atPath: out.path), "\(name): output written")
+        }
+    }
+
+    @Test("every raster format in the image extension list still converts under the policy")
+    func everyListedFormatConverts() async throws {
+        let f = try await FixtureStore.shared.get()
+        let rec = RecordingRunner()
+        var failures: [String] = []
+        let required = ["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp", "gif", "avif", "heic", "heif"]
+        for ext in required {
+            let dir = try scratch()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let input = dir.appendingPathComponent("in.\(ext)")
+            try await exec("magick", [f.photoJPG.path, input.path])   // built without the policy
+            do {
+                let formats = try await probeAndConvert(input, ext: ext, tools: rec)
+                let expected = [ext == "png" ? nil : "PNG", (ext == "jpg" || ext == "jpeg") ? nil : "JPEG"].compactMap { $0 }
+                if formats != expected { failures.append("\(ext): \(formats)") }
+            } catch {
+                failures.append("\(ext): \(error)")
+            }
+        }
+        #expect(failures.isEmpty, "\(failures)")
+        // JP2 and DNG are listed but need openjpeg / a raw library, which this ImageMagick may lack:
+        // when the tool decodes jp2 without the policy, it must still convert with it.
+        let dir = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let jp2 = dir.appendingPathComponent("in.jp2")
+        _ = try? await exec("sips", ["-s", "format", "jp2", f.alphaPNG.path, "--out", jp2.path])
+        if FileManager.default.fileExists(atPath: jp2.path), (try? await exec("magick", ["identify", jp2.path])) != nil {
+            let formats = try await probeAndConvert(jp2, ext: "jp2", tools: rec)
+            #expect(formats == ["PNG", "JPEG"])
+        }
+        let magickCalls = rec.calls.filter { $0.tool == "magick" }
+        #expect(!magickCalls.isEmpty)
+        #expect(magickCalls.allSatisfy { $0.environment["MAGICK_CONFIGURE_PATH"] != nil })
+    }
+
+    @Test("the policy refuses @file indirection, generators and delegates")
+    func policyRefusesIndirection() async throws {
+        let dir = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let png = dir.appendingPathComponent("a.png")
+        try await exec("magick", ["-size", "8x8", "xc:blue", png.path])
+        let env = try MagickPolicy.environment()
+        let policy = try String(contentsOf: URL(fileURLWithPath: env["MAGICK_CONFIGURE_PATH"]!).appendingPathComponent("policy.xml"),
+                                encoding: .utf8)
+        #expect(policy == MagickPolicy.xml)
+        for args in [["@" + png.path, "null:"], ["xc:red", "null:"], ["-size", "8x8", "gradient:", "null:"],
+                     ["text:" + png.path, "null:"], [png.path, "ps:" + dir.appendingPathComponent("o.ps").path]] {
+            let r = try await ToolRunner().run("magick", args, cwd: dir, environment: env, timeout: .seconds(30), outputLimit: 1 << 16)
+            #expect(!r.succeeded, "\(args) succeeded")
+        }
+        let ok = try await ToolRunner().run("magick", [png.path, "null:"], cwd: dir, environment: env, timeout: .seconds(30), outputLimit: 1 << 16)
+        #expect(ok.succeeded, "\(String(decoding: ok.stderr, as: UTF8.self))")
+    }
+
+    @Test("a policy file changed on disk is replaced before the next magick call")
+    func tamperedPolicyIsReplaced() throws {
+        let first = URL(fileURLWithPath: try MagickPolicy.environment()["MAGICK_CONFIGURE_PATH"]!)
+        let file = first.appendingPathComponent("policy.xml")
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        try Data("<policymap/>".utf8).write(to: file)
+        let second = URL(fileURLWithPath: try MagickPolicy.environment()["MAGICK_CONFIGURE_PATH"]!)
+        #expect(try Data(contentsOf: second.appendingPathComponent("policy.xml")) == Data(MagickPolicy.xml.utf8))
+    }
+
+    @Test("images over 100 MP fail probe as tooLarge, from identify output or the 16 KP limit")
+    func oversizeImagesAreTooLarge() async throws {
+        let dir = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let p = MediaProcessor()
+        // 110 MP: inside the policy's 16 KP width/height, above the 100 MP cap.
+        let big = dir.appendingPathComponent("in.png")
+        try bilevelPNG(width: 11_000, height: 10_000).write(to: big)
+        do { _ = try await p.probe(big, sourceExtension: "png"); Issue.record("110 MP accepted") }
+        catch MediaError.tooLarge {}
+        // 900 MP (the review's bomb): ImageMagick refuses the 30000 px width.
+        let bomb = dir.appendingPathComponent("bomb", isDirectory: true)
+        try FileManager.default.createDirectory(at: bomb, withIntermediateDirectories: true)
+        let bombFile = bomb.appendingPathComponent("in.png")
+        try bilevelPNG(width: 30_000, height: 30_000).write(to: bombFile)
+        let start = ContinuousClock.now
+        do { _ = try await p.probe(bombFile, sourceExtension: "png"); Issue.record("900 MP accepted") }
+        catch MediaError.tooLarge {}
+        #expect(ContinuousClock.now - start < .seconds(10))
+        // 99 MP passes the cap.
+        let ok = dir.appendingPathComponent("ok", isDirectory: true)
+        try FileManager.default.createDirectory(at: ok, withIntermediateDirectories: true)
+        let okFile = ok.appendingPathComponent("in.png")
+        try bilevelPNG(width: 9_900, height: 10_000).write(to: okFile)
+        let info = try await p.probe(okFile, sourceExtension: "png")
+        #expect(info.width == 9_900 && info.height == 10_000)
     }
 }

@@ -144,6 +144,7 @@ struct ExtractorTests {
 
     @Test func unknownExtensionIsNil() async throws {
         let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
         let f = d.appendingPathComponent("a.zip")
         try Data([1, 2, 3]).write(to: f)
         #expect(await extractor.extract(from: f, sourceExtension: "zip") == nil)
@@ -154,6 +155,7 @@ struct ExtractorTests {
 
     @Test func largeImageIsDownscaledToJPEG() async throws {
         let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
         let f = d.appendingPathComponent("big.png")
         try Fixtures.writeImage(Fixtures.bitmap(width: 2000, height: 1000, noise: false), to: f, type: .png)
         let data = try #require(jpeg(await extractor.extract(from: f, sourceExtension: "png")))
@@ -166,6 +168,7 @@ struct ExtractorTests {
 
     @Test func exifOrientationIsApplied() async throws {
         let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
         let f = d.appendingPathComponent("rot.jpg")
         // 400x200 stored, orientation 6 (rotate 90 CW): displays as 200x400.
         try Fixtures.writeImage(Fixtures.bitmap(width: 400, height: 200, noise: false), to: f, type: .jpeg, orientation: 6)
@@ -176,6 +179,7 @@ struct ExtractorTests {
 
     @Test func noiseImageStaysUnderCap() async throws {
         let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
         let f = d.appendingPathComponent("noise.png")
         try Fixtures.writeImage(Fixtures.bitmap(width: 800, height: 800, noise: true), to: f, type: .png)
         // Full-entropy content either fits after the quality ladder or is refused; never above the cap.
@@ -198,6 +202,7 @@ struct ExtractorTests {
 
     @Test func corruptImageIsNil() async throws {
         let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
         let f = d.appendingPathComponent("bad.jpg")
         try Data("not an image".utf8).write(to: f)
         #expect(await extractor.extract(from: f, sourceExtension: "jpg") == nil)
@@ -215,6 +220,7 @@ struct ExtractorTests {
 
     @Test func videoMiddleFrame() async throws {
         let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
         let f = d.appendingPathComponent("clip.mp4")
         try await Fixtures.video(at: f)
         let data = try #require(jpeg(await extractor.extract(from: f, sourceExtension: "mp4")))
@@ -227,6 +233,7 @@ struct ExtractorTests {
 
     @Test func pdfWithTextLayer() async throws {
         let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
         let f = d.appendingPathComponent("t.pdf")
         Fixtures.textPDF("Quarterly budget report for Acme Corporation", at: f)
         let s = try #require(text(await extractor.extract(from: f, sourceExtension: "pdf")))
@@ -236,6 +243,7 @@ struct ExtractorTests {
 
     @Test func pdfWithoutTextFallsBackToThumbnail() async throws {
         let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
         let f = d.appendingPathComponent("scan.pdf")
         Fixtures.imagePDF(at: f)
         let data = try #require(jpeg(await extractor.extract(from: f, sourceExtension: "pdf")))
@@ -248,6 +256,7 @@ struct ExtractorTests {
 
     @Test func plainTextIsCappedAtCharacterBoundary() async throws {
         let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
         let f = d.appendingPathComponent("long.txt")
         // 3-byte characters: 2048 is not a multiple of 3, so a cut mid-character would show.
         try String(repeating: "日", count: 5000).write(to: f, atomically: true, encoding: .utf8)
@@ -258,6 +267,7 @@ struct ExtractorTests {
 
     @Test func jsonAndMarkdown() async throws {
         let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
         let j = d.appendingPathComponent("a.json")
         try #"{"project":"alpha"}"#.write(to: j, atomically: true, encoding: .utf8)
         #expect(text(await extractor.extract(from: j, sourceExtension: "json")) == #"{"project":"alpha"}"#)
@@ -268,6 +278,7 @@ struct ExtractorTests {
 
     @Test func emptyAndBinaryTextIsNil() async throws {
         let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
         let e = d.appendingPathComponent("e.txt")
         try "  \n ".write(to: e, atomically: true, encoding: .utf8)
         #expect(await extractor.extract(from: e, sourceExtension: "txt") == nil)
@@ -278,6 +289,7 @@ struct ExtractorTests {
 
     @Test func csvKeepsHeaderAndFiveRows() async throws {
         let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
         let f = d.appendingPathComponent("t.csv")
         let rows = (0...20).map { $0 == 0 ? "id,name,amount" : "\($0),item\($0),\($0 * 10)" }
         try rows.joined(separator: "\r\n").write(to: f, atomically: true, encoding: .utf8)
@@ -290,6 +302,7 @@ struct ExtractorTests {
 
     @Test func tsvAndCsvCapBytes() async throws {
         let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
         let f = d.appendingPathComponent("wide.tsv")
         let row = (0..<400).map { "col\($0)" }.joined(separator: "\t")
         try Array(repeating: row, count: 10).joined(separator: "\n").write(to: f, atomically: true, encoding: .utf8)
@@ -301,6 +314,7 @@ struct ExtractorTests {
 
     @Test func docxViaTextutil() async throws {
         let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
         let src = d.appendingPathComponent("src.txt")
         try "Lease agreement between Alice and Bob for the apartment on Main Street.".write(to: src, atomically: true, encoding: .utf8)
         let docx = d.appendingPathComponent("lease.docx")
@@ -312,6 +326,7 @@ struct ExtractorTests {
 
     @Test func rtfViaTextutil() async throws {
         let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
         let f = d.appendingPathComponent("a.rtf")
         try #"{\rtf1\ansi Meeting notes for the board.}"#.write(to: f, atomically: true, encoding: .utf8)
         let s = try #require(text(await extractor.extract(from: f, sourceExtension: "rtf")))
@@ -320,6 +335,7 @@ struct ExtractorTests {
 
     @Test func xlsxSheetNamesAndStrings() async throws {
         let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
         let f = d.appendingPathComponent("b.xlsx")
         try await Fixtures.zip([
             "xl/workbook.xml": #"<workbook><sheets><sheet name="Q1 Budget" sheetId="1" r:id="rId1"/><sheet name="Headcount &amp; Hiring" sheetId="2" r:id="rId2"/></sheets></workbook>"#,
@@ -333,6 +349,7 @@ struct ExtractorTests {
 
     @Test func pptxSlideText() async throws {
         let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
         let f = d.appendingPathComponent("deck.pptx")
         try await Fixtures.zip([
             "ppt/slides/slide1.xml": "<p:sld><a:p><a:r><a:t>Launch plan</a:t></a:r></a:p></p:sld>",
@@ -345,6 +362,7 @@ struct ExtractorTests {
 
     @Test func odsAndOdp() async throws {
         let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
         let ods = d.appendingPathComponent("a.ods")
         try await Fixtures.zip(["content.xml": #"<office:document-content><table:table table:name="Inventory"><text:p>Widgets</text:p></table:table></office:document-content>"#], at: ods, in: d)
         let s = try #require(text(await extractor.extract(from: ods, sourceExtension: "ods")))
@@ -356,6 +374,7 @@ struct ExtractorTests {
 
     @Test func corruptZipIsNil() async throws {
         let d = try Fixtures.dir()
+        defer { try? FileManager.default.removeItem(at: d) }
         let f = d.appendingPathComponent("bad.xlsx")
         try Data("PK garbage".utf8).write(to: f)
         #expect(await extractor.extract(from: f, sourceExtension: "xlsx") == nil)
@@ -412,13 +431,15 @@ private func bilevelPNG(width: Int, height: Int) throws -> Data {
     let extractor = ContentExtractor()
 
     @Test func pixelCap() {
-        #expect(ContentExtractor.withinPixelCap(width: 10_000, height: 10_000))
-        #expect(!ContentExtractor.withinPixelCap(width: 10_001, height: 10_000))
-        #expect(!ContentExtractor.withinPixelCap(width: 0, height: 10))
-        #expect(!ContentExtractor.withinPixelCap(width: Int.max, height: 3))
+        func ok(_ w: Int, _ h: Int, _ bytes: Int64) -> Bool { ContentExtractor.withinPixelCap(width: w, height: h, bytes: bytes) }
+        #expect(ok(11_648, 8_736, 40_000_000))     // GFX100
+        #expect(ok(16_000, 12_500, 60_000_000))    // 200 MP
+        #expect(!ok(30_000, 30_000, 109_000))      // bomb
+        #expect(!ok(0, 10, 100))
+        #expect(!ok(Int.max, 3, Int64.max))
     }
 
-    @Test("images over 100 MP are not thumbnailed; 99 MP still is")
+    @Test("a ~100 KB 900 MP PNG bomb is not thumbnailed; a small flat image is")
     func oversizeImageIsNotDecoded() async throws {
         let d = try Fixtures.dir()
         defer { try? FileManager.default.removeItem(at: d) }
@@ -428,7 +449,7 @@ private func bilevelPNG(width: Int, height: Int) throws -> Data {
         #expect(await extractor.extract(from: bomb, sourceExtension: "png") == nil)
         #expect(ContinuousClock.now - start < .seconds(2))
         let big = d.appendingPathComponent("big.png")
-        try bilevelPNG(width: 11_000, height: 10_000).write(to: big)
+        try bilevelPNG(width: 11_000, height: 10_000).write(to: big)   // 110 MP in a few KB
         #expect(await extractor.extract(from: big, sourceExtension: "png") == nil)
         let ok = d.appendingPathComponent("ok.png")
         try bilevelPNG(width: 2_000, height: 1_000).write(to: ok)

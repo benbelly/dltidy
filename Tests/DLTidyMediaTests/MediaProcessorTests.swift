@@ -4,7 +4,7 @@ import Testing
 @testable import DLTidyMedia
 
 @Suite struct PlanningTests {
-    let p = MediaProcessor()
+    let p = MediaProcessor(policyDirectory: testPolicyDir)
     func plan(_ kind: MediaKind, _ dur: Double? = nil, _ ext: String, live: Bool = false) -> [OutputFormat] {
         p.plannedOutputs(info: MediaInfo(kind: kind, durationSeconds: dur), sourceExtension: ext, isLivePhotoVideo: live)
     }
@@ -51,7 +51,7 @@ import Testing
     @Test func notMediaRunsNoTools() async throws {
         let f = try await FixtureStore.shared.get()
         let rec = RecordingRunner()
-        let p = MediaProcessor(tools: rec)
+        let p = MediaProcessor(tools: rec, policyDirectory: testPolicyDir)
         for (url, ext) in [(f.pdf, "pdf"), (f.txt, "txt")] {
             await #expect(throws: MediaError.notMedia) { _ = try await p.probe(url, sourceExtension: ext) }
         }
@@ -60,7 +60,7 @@ import Testing
 
     @Test func corruptFilesAreUnreadable() async throws {
         let f = try await FixtureStore.shared.get()
-        let p = MediaProcessor()
+        let p = MediaProcessor(policyDirectory: testPolicyDir)
         do { _ = try await p.probe(f.corruptJPG, sourceExtension: "jpg"); Issue.record("no throw") }
         catch MediaError.unreadable {}
         do { _ = try await p.probe(f.corruptMP4, sourceExtension: "mp4"); Issue.record("no throw") }
@@ -77,7 +77,7 @@ import Testing
         let data = try Data(contentsOf: full)
         let cut = dir.appendingPathComponent("in.jpg")
         try data.prefix(data.count / 2).write(to: cut)
-        let p = MediaProcessor()
+        let p = MediaProcessor(policyDirectory: testPolicyDir)
         _ = try await p.probe(full, sourceExtension: "jpg")
         do { _ = try await p.probe(cut, sourceExtension: "jpg"); Issue.record("truncated jpg passed probe") }
         catch MediaError.unreadable {}
@@ -85,17 +85,18 @@ import Testing
 
     @Test func missingToolMapsToToolMissing() async throws {
         let f = try await FixtureStore.shared.get()
-        let p = MediaProcessor(tools: MissingToolRunner())
+        let p = MediaProcessor(tools: MissingToolRunner(), policyDirectory: testPolicyDir)
         await #expect(throws: MediaError.toolMissing("ffprobe")) { _ = try await p.probe(f.h264MOV, sourceExtension: "mov") }
         await #expect(throws: MediaError.toolMissing("magick")) { _ = try await p.probe(f.photoJPG, sourceExtension: "jpg") }
     }
 
     @Test func timeoutMapsToTimeout() async throws {
         let f = try await FixtureStore.shared.get()
-        let p = MediaProcessor(tools: TimedOutRunner())
+        let p = MediaProcessor(tools: TimedOutRunner(), policyDirectory: testPolicyDir)
         do { _ = try await p.probe(f.h264MOV, sourceExtension: "mov"); Issue.record("no throw") }
         catch MediaError.timeout(_) {}
         let dir = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
         let input = try stage(f.photoJPG, in: dir)
         do {
             try await p.convert(input: input, info: MediaInfo(kind: .stillImage, width: 120, height: 80), to: .png,
@@ -107,8 +108,9 @@ import Testing
     @Test func probeAndConvertTimeoutsFollowTheRules() async throws {
         let f = try await FixtureStore.shared.get()
         let rec = RecordingRunner()
-        let p = MediaProcessor(tools: rec)
+        let p = MediaProcessor(tools: rec, policyDirectory: testPolicyDir)
         let dir = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
         let input = try stage(f.h264MOV, in: dir)
         let info = try await p.probe(input, sourceExtension: "mov")
         try await p.convert(input: input, info: info, to: .mp4, output: dir.appendingPathComponent("o.mp4"),
@@ -120,8 +122,9 @@ import Testing
 
     @Test func longReencodeIsDeferredAndHugeIsRefused() async throws {
         let f = try await FixtureStore.shared.get()
-        let p = MediaProcessor()
+        let p = MediaProcessor(policyDirectory: testPolicyDir)
         let dir = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
         let input = try stage(f.hevcMOV, in: dir)   // HEVC forces the re-encode path
         let out = dir.appendingPathComponent("o.mp4")
         var info = try await p.probe(input, sourceExtension: "mov")
@@ -139,8 +142,9 @@ import Testing
 
     @Test func oversizedGifIsDiscarded() async throws {
         let f = try await FixtureStore.shared.get()
-        let p = MediaProcessor(tools: ToolRunner(), maxGIFBytes: 1000)
+        let p = MediaProcessor(tools: ToolRunner(), maxGIFBytes: 1000, policyDirectory: testPolicyDir)
         let dir = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
         let input = try stage(f.h264MOV, in: dir)
         let info = try await p.probe(input, sourceExtension: "mov")
         let out = dir.appendingPathComponent("o.gif")
@@ -152,7 +156,7 @@ import Testing
 }
 
 @Suite struct ProbeTests {
-    let p = MediaProcessor()
+    let p = MediaProcessor(policyDirectory: testPolicyDir)
 
     @Test func stillsAndHEIC() async throws {
         let f = try await FixtureStore.shared.get()
@@ -188,10 +192,12 @@ import Testing
 }
 
 @Suite struct StillConversionTests {
-    let p = MediaProcessor()
+    let p = MediaProcessor(policyDirectory: testPolicyDir)
+
+    let bin = ScratchBin()   // each test gets its own suite value; its deinit removes the helper's directories
 
     func convert(_ src: URL, ext: String, to format: OutputFormat) async throws -> URL {
-        let dir = try scratch()
+        let dir = try bin.make()
         let input = try stage(src, in: dir)
         let info = try await p.probe(input, sourceExtension: ext)
         let out = dir.appendingPathComponent("out." + format.rawValue)
@@ -242,6 +248,7 @@ import Testing
     @Test func animatedGifFirstFrameForStillOutputIsRejected() async throws {
         let f = try await FixtureStore.shared.get()
         let dir = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
         let input = try stage(f.animGIF, in: dir)
         let info = try await p.probe(input, sourceExtension: "gif")
         await #expect(throws: MediaError.failed("png output needs a still image")) {
@@ -252,10 +259,12 @@ import Testing
 }
 
 @Suite struct VideoConversionTests {
+    let bin = ScratchBin()   // each test gets its own suite value; its deinit removes the helper's directories
+
     func run(_ src: URL, ext: String, formats: [OutputFormat], tools: any ToolRunning = ToolRunner()) async throws
         -> (dir: URL, outs: [OutputFormat: URL]) {
-        let p = MediaProcessor(tools: tools)
-        let dir = try scratch()
+        let p = MediaProcessor(tools: tools, policyDirectory: testPolicyDir)
+        let dir = try bin.make()
         let input = try stage(src, in: dir)
         let info = try await p.probe(input, sourceExtension: ext)
         var outs: [OutputFormat: URL] = [:]
@@ -301,8 +310,9 @@ import Testing
 
     @Test func mkvLongClipGetsMp4Only() async throws {
         let f = try await FixtureStore.shared.get()
-        let p = MediaProcessor()
+        let p = MediaProcessor(policyDirectory: testPolicyDir)
         let dir = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
         let input = try stage(f.mkv, in: dir)
         let info = try await p.probe(input, sourceExtension: "mkv")
         let planned = p.plannedOutputs(info: info, sourceExtension: "mkv", isLivePhotoVideo: false)
@@ -377,8 +387,9 @@ import Testing
 @Suite struct HDRMetadataTests {
     @Test func locationTagSurvivesHDRExport() async throws {
         let f = try await FixtureStore.shared.get()
-        let p = MediaProcessor()
+        let p = MediaProcessor(policyDirectory: testPolicyDir)
         let dir = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
         let input = try stage(f.hdrMOV, in: dir)
         let info = try await p.probe(input, sourceExtension: "mov")
         let out = dir.appendingPathComponent("o.mp4")
@@ -391,7 +402,7 @@ import Testing
 @Suite struct ImageMagickPolicyTests {
     /// Probe, then convert to every planned still output; returns the outputs' identify formats.
     func probeAndConvert(_ input: URL, ext: String, tools: any ToolRunning) async throws -> [String] {
-        let p = MediaProcessor(tools: tools)
+        let p = MediaProcessor(tools: tools, policyDirectory: testPolicyDir)
         let info = try await p.probe(input, sourceExtension: ext)
         #expect(info.kind == .stillImage)
         var formats: [String] = []
@@ -421,7 +432,7 @@ import Testing
                 """,
             "postscript": "%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 100 100\nnewpath 0 0 moveto 100 0 lineto 100 100 lineto closepath fill\nshowpage\n",
         ]
-        let p = MediaProcessor()
+        let p = MediaProcessor(policyDirectory: testPolicyDir)
         for (name, body) in payloads {
             let stage = dir.appendingPathComponent(name, isDirectory: true)
             try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: true)
@@ -485,10 +496,8 @@ import Testing
         defer { try? FileManager.default.removeItem(at: dir) }
         let png = dir.appendingPathComponent("a.png")
         try await exec("magick", ["-size", "8x8", "xc:blue", png.path])
-        let env = try MagickPolicy.environment()
-        let policy = try String(contentsOf: URL(fileURLWithPath: env["MAGICK_CONFIGURE_PATH"]!).appendingPathComponent("policy.xml"),
-                                encoding: .utf8)
-        #expect(policy == MagickPolicy.xml)
+        let env = try MagickPolicy.environment(directory: testPolicyDir)
+        #expect(env["MAGICK_CONFIGURE_PATH"] == testPolicyDir.path)
         for args in [["@" + png.path, "null:"], ["xc:red", "null:"], ["-size", "8x8", "gradient:", "null:"],
                      ["text:" + png.path, "null:"], [png.path, "ps:" + dir.appendingPathComponent("o.ps").path]] {
             let r = try await ToolRunner().run("magick", args, cwd: dir, environment: env, timeout: .seconds(30), outputLimit: 1 << 16)
@@ -498,41 +507,73 @@ import Testing
         #expect(ok.succeeded, "\(String(decoding: ok.stderr, as: UTF8.self))")
     }
 
-    @Test("a policy file changed on disk is replaced before the next magick call")
-    func tamperedPolicyIsReplaced() throws {
-        let first = URL(fileURLWithPath: try MagickPolicy.environment()["MAGICK_CONFIGURE_PATH"]!)
-        let file = first.appendingPathComponent("policy.xml")
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
-        try Data("<policymap/>".utf8).write(to: file)
-        let second = URL(fileURLWithPath: try MagickPolicy.environment()["MAGICK_CONFIGURE_PATH"]!)
-        #expect(try Data(contentsOf: second.appendingPathComponent("policy.xml")) == Data(MagickPolicy.xml.utf8))
-    }
-
-    @Test("images over 100 MP fail probe as tooLarge, from identify output or the 16 KP limit")
-    func oversizeImagesAreTooLarge() async throws {
+    @Test("a missing or empty policy.xml: no magick call runs, and the problem is reported")
+    func missingPolicyFailsClosed() async throws {
+        let f = try await FixtureStore.shared.get()
         let dir = try scratch()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let p = MediaProcessor()
-        // 110 MP: inside the policy's 16 KP width/height, above the 100 MP cap.
-        let big = dir.appendingPathComponent("in.png")
-        try bilevelPNG(width: 11_000, height: 10_000).write(to: big)
-        do { _ = try await p.probe(big, sourceExtension: "png"); Issue.record("110 MP accepted") }
-        catch MediaError.tooLarge {}
-        // 900 MP (the review's bomb): ImageMagick refuses the 30000 px width.
-        let bomb = dir.appendingPathComponent("bomb", isDirectory: true)
-        try FileManager.default.createDirectory(at: bomb, withIntermediateDirectories: true)
-        let bombFile = bomb.appendingPathComponent("in.png")
-        try bilevelPNG(width: 30_000, height: 30_000).write(to: bombFile)
+        let empty = dir.appendingPathComponent("empty", isDirectory: true)
+        try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+        let blank = dir.appendingPathComponent("blank", isDirectory: true)
+        try FileManager.default.createDirectory(at: blank, withIntermediateDirectories: true)
+        try Data().write(to: blank.appendingPathComponent("policy.xml"))
+        let input = try stage(f.photoJPG, in: dir)
+        for policyDir in [empty, blank, dir.appendingPathComponent("nonexistent", isDirectory: true)] {
+            let rec = RecordingRunner()
+            let p = MediaProcessor(tools: rec, policyDirectory: policyDir)
+            #expect(p.policyProblem() != nil)
+            await #expect(throws: MediaError.toolMissing("magick policy")) { _ = try await p.probe(input, sourceExtension: "jpg") }
+            await #expect(throws: MediaError.toolMissing("magick policy")) {
+                try await p.convert(input: input, info: MediaInfo(kind: .stillImage, width: 120, height: 80), to: .png,
+                                    output: dir.appendingPathComponent("out.png"), workDir: dir, allowLongEncode: true)
+            }
+            #expect(rec.calls.filter { $0.tool == "magick" }.isEmpty, "magick ran without a policy in \(policyDir.lastPathComponent)")
+        }
+        #expect(MediaProcessor(policyDirectory: testPolicyDir).policyProblem() == nil)
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("out.png").path))
+    }
+
+    @Test("a ~100 KB 900 MP 1-bit PNG bomb is tooLarge at probe, quickly")
+    func bombIsTooLarge() async throws {
+        let dir = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let p = MediaProcessor(policyDirectory: testPolicyDir)
+        let bomb = dir.appendingPathComponent("in.png")
+        try bilevelPNG(width: 30_000, height: 30_000).write(to: bomb)
         let start = ContinuousClock.now
-        do { _ = try await p.probe(bombFile, sourceExtension: "png"); Issue.record("900 MP accepted") }
+        do { _ = try await p.probe(bomb, sourceExtension: "png"); Issue.record("900 MP bomb accepted") }
         catch MediaError.tooLarge {}
         #expect(ContinuousClock.now - start < .seconds(10))
-        // 99 MP passes the cap.
+    }
+
+    @Test("a 110 MP bomb (inside the policy limits) is tooLarge from the pixel ratio; a 40 MP flat image passes")
+    func ratioRuleAtProbe() async throws {
+        let dir = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let p = MediaProcessor(policyDirectory: testPolicyDir)
+        let big = dir.appendingPathComponent("in.png")
+        try bilevelPNG(width: 11_000, height: 10_000).write(to: big)
+        do { _ = try await p.probe(big, sourceExtension: "png"); Issue.record("110 MP bomb accepted") }
+        catch MediaError.tooLarge {}
         let ok = dir.appendingPathComponent("ok", isDirectory: true)
         try FileManager.default.createDirectory(at: ok, withIntermediateDirectories: true)
         let okFile = ok.appendingPathComponent("in.png")
-        try bilevelPNG(width: 9_900, height: 10_000).write(to: okFile)
+        try bilevelPNG(width: 8_000, height: 5_000).write(to: okFile)   // 40 MP, under the ratio floor
         let info = try await p.probe(okFile, sourceExtension: "png")
-        #expect(info.width == 9_900 && info.height == 10_000)
+        #expect(info.width == 8_000 && info.height == 5_000)
+    }
+
+    @Test("a 20000x3000 noisy panorama (60 MP, wider than 16 KP) probes and converts")
+    func widePanoramaConverts() async throws {
+        let dir = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = dir.appendingPathComponent("in.jpg")
+        try await exec("magick", ["-size", "20000x3000", "xc:", "+noise", "Random", "-quality", "60", input.path])
+        let p = MediaProcessor(policyDirectory: testPolicyDir)
+        let info = try await p.probe(input, sourceExtension: "jpg")
+        #expect(info.width == 20_000 && info.height == 3_000)
+        let out = dir.appendingPathComponent("out.png")
+        try await p.convert(input: input, info: info, to: .png, output: out, workDir: dir, allowLongEncode: true)
+        #expect(try await identify(out, "%wx%h") == "20000x3000")
     }
 }

@@ -123,6 +123,8 @@ case "doctor":
         let path = runner.resolve(tool)
         line(path != nil, tool, path ?? "not found on PATH or in /opt/homebrew/bin")
     }
+    let policyProblem = MediaProcessor(tools: runner).policyProblem()
+    line(policyProblem == nil, "magick-policy", policyProblem ?? "present")
     let hasKey = useKeychain && Keychain.readAPIKey() != nil
     line(hasKey, "key", hasKey ? "present" : "absent; run `dltidy set-key`")
     if let c = try? ControlClient(config: config) {

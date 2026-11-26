@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ImageMagick security policy for every `magick` call dltidy makes (MAGICK_CONFIGURE_PATH points here).
+  The Makefile `bundle` target copies it into DLTidy.app/Contents/Resources/magick, where the code
+  signature seals it.
+
+  ImageMagick picks the decoder by content, so a file named .jpg can be SVG (reads other local files) or
+  PostScript (Ghostscript). Only the raster coders behind MediaProcessor.imageExtensions are allowed,
+  plus NULL for writing (the decode check). Every delegate (external program) and @file indirection is
+  denied. Homebrew's ImageMagick has no openjpeg (JP2 does not decode with or without the policy) and no
+  raw library: DNG decodes only through the darktable-cli delegate, which the policy denies.
+
+  Resource limits stop decompression bombs. The pixel-ratio rule (ImageLimits) rejects them earlier.
+-->
+<policymap>
+  <policy domain="delegate" rights="none" pattern="*"/>
+  <policy domain="module" rights="none" pattern="*"/>
+  <policy domain="module" rights="read|write" pattern="{PNG,JPEG,HEIC,TIFF,BMP,WEBP,GIF,JP2,DNG,NULL}"/>
+  <policy domain="coder" rights="none" pattern="*"/>
+  <policy domain="coder" rights="read|write" pattern="{PNG,PNG8,PNG24,PNG32,PNG48,PNG64,PNG00,JPEG,JPG,HEIC,HEIF,AVIF,TIFF,TIF,TIFF64,BMP,BMP2,BMP3,WEBP,GIF,GIF87,JP2,J2K,J2C,JPC,JPX,DNG}"/>
+  <policy domain="coder" rights="write" pattern="NULL"/>
+  <policy domain="path" rights="none" pattern="@*"/>
+  <policy domain="resource" name="memory" value="512MiB"/>
+  <policy domain="resource" name="map" value="1GiB"/>
+  <policy domain="resource" name="disk" value="8GiB"/>
+  <policy domain="resource" name="area" value="256MP"/>
+  <policy domain="resource" name="width" value="64KP"/>
+  <policy domain="resource" name="height" value="64KP"/>
+</policymap>

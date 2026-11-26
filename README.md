@@ -83,6 +83,7 @@ Sources/DLTidyMedia/   conversion (ImageMagick, ffmpeg, AVFoundation)
 Sources/DLTidyNaming/  name rules, content extraction, Anthropic client
 Sources/DLTidyCore/    ledger, scanner, pipeline, budget, health
 Sources/dltidy/        daemon and CLI
+Support/magick/        ImageMagick policy, copied into the app bundle before signing
 ```
 
 `swift test` runs against fakes; live API calls need `DLTIDY_LIVE=1`.

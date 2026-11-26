@@ -28,6 +28,10 @@ extension Engine {
                                    detail: missing.isEmpty ? env.requiredTools.joined(separator: ", ") : "missing: \(missing.joined(separator: ", "))",
                                    blocking: false))
 
+        let policyProblem = env.magickPolicyProblem()
+        results.append(HealthCheck(name: "magick-policy", ok: policyProblem == nil,
+                                   detail: policyProblem ?? "present", blocking: false))
+
         let hasKey = env.apiKey() != nil
         results.append(HealthCheck(name: "key", ok: hasKey, detail: hasKey ? "present" : "absent; run dltidy set-key", blocking: false))
 
@@ -89,6 +93,7 @@ extension Engine {
         switch name {
         case "downloads": return "dltidy cannot read Downloads"
         case "tools": return "dltidy: conversion tools missing"
+        case "magick-policy": return "dltidy: ImageMagick policy missing"
         case "key": return "dltidy: no API key"
         case "staging": return "dltidy cannot use its staging folder"
         case "ledger": return "dltidy ledger check failed"
@@ -102,6 +107,7 @@ extension Engine {
         case "downloads":
             return "Grant access in System Settings > Privacy & Security > Files and Folders > DLTidy > Downloads Folder."
         case "tools": return "\(r.detail). Install with `brew install ffmpeg imagemagick`. Affected files wait."
+        case "magick-policy": return "\(r.detail). Reinstall dltidy (`make install`). Image conversions wait."
         case "key": return "Run `dltidy set-key`. Files are converted under their old names until then."
         case "space": return "\(r.detail). Conversions wait until space is free."
         default: return r.detail

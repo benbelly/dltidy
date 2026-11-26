@@ -75,9 +75,9 @@ extension MediaProcessor {
         let r = try await run("magick", ["identify", "-format", "%n %w %h %T\n", file.lastPathComponent],
                               cwd: file.deletingLastPathComponent(), timeout: Self.probeTimeout)
         guard r.status == 0 else {
-            // The policy's width/height limits refuse an oversized canvas before identify prints it.
+            // The policy's width/height/area limits refuse an oversized canvas before identify prints it.
             let text = String(decoding: r.stderr, as: UTF8.self).lowercased()
-            if text.contains("exceeds limit") || text.contains("exceeds user limit") {
+            if ["exceeds limit", "exceeds user limit", "resources exhausted"].contains(where: text.contains) {
                 throw MediaError.tooLarge("identify: \(Self.tail(r.stderr))")
             }
             throw MediaError.unreadable("identify: \(Self.tail(r.stderr))")
@@ -87,9 +87,9 @@ extension MediaProcessor {
         guard let first = rows.first, first.count == 4, first[1] > 0, first[2] > 0 else {
             throw MediaError.unreadable("identify output not parseable")
         }
-        let (pixels, overflow) = first[1].multipliedReportingOverflow(by: first[2])
-        if overflow || pixels > Self.maxImagePixels {
-            throw MediaError.tooLarge("\(first[1])x\(first[2]) exceeds \(Self.maxImagePixels / 1_000_000) MP")
+        let bytes = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+        guard ImageLimits.isAcceptable(width: first[1], height: first[2], fileBytes: bytes) else {
+            throw MediaError.tooLarge("\(first[1])x\(first[2]) in \(bytes) bytes exceeds the pixel limits")
         }
         let animatable = ext == "gif" || ext == "webp"
         guard animatable, first[0] > 1 else {

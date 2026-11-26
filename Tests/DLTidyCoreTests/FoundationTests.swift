@@ -304,6 +304,24 @@ struct CommandTests {
         #expect(try h.meta("health_report")?.contains("ok   tools") == true)
     }
 
+    @Test("health: a missing ImageMagick policy is reported and raises one notice, cleared when it returns")
+    func healthMagickPolicy() async throws {
+        let problem = Locked<String?>("cannot read policy.xml")
+        let h = try await Harness()
+        var env = h.environment
+        env.magickPolicyProblem = { problem.get }
+        h.engine = try await Engine(config: h.config, environment: env)
+        var results = await h.engine.runHealth()
+        #expect(results.first { $0.name == "magick-policy" }?.ok == false)
+        #expect(results.first { $0.name == "magick-policy" }?.detail == "cannot read policy.xml")
+        await h.engine.runHealth()
+        #expect(h.notifier.count == 1)
+        problem.set(nil)
+        results = await h.engine.runHealth()
+        #expect(results.allSatisfy { $0.ok })
+        #expect(try h.meta("health_report")?.contains("ok   magick-policy") == true)
+    }
+
     @Test("a missing tool during conversion: item waits with one notice, resumes when the tool returns")
     func toolMissingWaits() async throws {
         let h = try await Harness()

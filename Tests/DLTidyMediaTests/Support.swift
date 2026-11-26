@@ -58,11 +58,31 @@ func exec(_ tool: String, _ args: [String], cwd: URL? = nil) async throws -> Str
 
 enum MediaTestError: Error { case toolFailed(String) }
 
-/// Per-test scratch directory.
+/// The repo's ImageMagick policy directory, the one `make bundle` copies into the app.
+let testPolicyDir: URL = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    .appendingPathComponent("Support/magick", isDirectory: true)
+
+/// Per-test scratch directory. Callers `defer` its removal.
 func scratch() throws -> URL {
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent("dltidy-media-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     return dir
+}
+
+/// Scratch directories created by a test helper that returns paths into them. A suite holds one as a
+/// stored property; swift-testing builds a fresh suite value per test, so its deinit runs after the test.
+final class ScratchBin: @unchecked Sendable {
+    private let lock = NSLock()
+    private var dirs: [URL] = []
+
+    func make() throws -> URL {
+        let dir = try scratch()
+        lock.withLock { dirs.append(dir) }
+        return dir
+    }
+
+    deinit { for dir in dirs { try? FileManager.default.removeItem(at: dir) } }
 }
 
 /// Copies a fixture to `<dir>/in.<ext>`, as core stages it.
@@ -89,19 +109,29 @@ struct Fixtures: Sendable {
     var txt: URL { dir.appendingPathComponent("note.txt") }
 }
 
+/// Shared fixtures live in one fixed directory: removed before each run builds them, and again at exit.
+private let fixtureDir = FileManager.default.temporaryDirectory.appendingPathComponent("dltidy-media-fixtures", isDirectory: true)
+
 actor FixtureStore {
     static let shared = FixtureStore()
-    private var cached: Fixtures?
+    private var building: Task<Fixtures, Error>?
 
+    /// Builds the fixtures once; concurrent callers wait for the same build (actor calls re-enter at `await`).
     func get() async throws -> Fixtures {
-        if let cached { return cached }
-        let f = Fixtures(dir: try scratch())
-        try await build(f)
-        cached = f
-        return f
+        if let building { return try await building.value }
+        let task = Task {
+            try? FileManager.default.removeItem(at: fixtureDir)
+            try FileManager.default.createDirectory(at: fixtureDir, withIntermediateDirectories: true)
+            atexit { try? FileManager.default.removeItem(at: fixtureDir) }
+            let f = Fixtures(dir: fixtureDir)
+            try await Self.build(f)
+            return f
+        }
+        building = task
+        return try await task.value
     }
 
-    private func build(_ f: Fixtures) async throws {
+    private static func build(_ f: Fixtures) async throws {
         let plain = f.dir.appendingPathComponent("plain.jpg")
         try await exec("magick", ["-size", "120x80", "gradient:red-blue", plain.path])
         try insertEXIF(into: plain, output: f.photoJPG)

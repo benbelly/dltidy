@@ -34,6 +34,8 @@ public struct EngineEnvironment: Sendable {
     /// Tools the media module needs, checked by health.
     public var requiredTools: [String]
     public var resolveTool: @Sendable (String) -> String?
+    /// nil when the ImageMagick policy is in place; otherwise why not. Checked by health.
+    public var magickPolicyProblem: @Sendable () -> String?
     /// True for extensions dltidy converts or names (media or nameable document). Others are ignored
     /// without cloning or hashing.
     public var isProcessableExtension: @Sendable (String) -> Bool
@@ -54,6 +56,7 @@ public struct EngineEnvironment: Sendable {
         freeSpace: @escaping @Sendable (URL) -> Int64? = { FS.freeSpace($0) },
         requiredTools: [String] = [],
         resolveTool: @escaping @Sendable (String) -> String? = { ToolRunner().resolve($0) },
+        magickPolicyProblem: @escaping @Sendable () -> String? = { nil },
         isProcessableExtension: @escaping @Sendable (String) -> Bool,
         failpoints: Failpoints = Failpoints(),
         onAction: (@Sendable (ActionEvent) -> Void)? = nil,
@@ -71,6 +74,7 @@ public struct EngineEnvironment: Sendable {
         self.freeSpace = freeSpace
         self.requiredTools = requiredTools
         self.resolveTool = resolveTool
+        self.magickPolicyProblem = magickPolicyProblem
         self.isProcessableExtension = isProcessableExtension
         self.failpoints = failpoints
         self.onAction = onAction

@@ -96,9 +96,10 @@ enum Daemon {
         let tools = ToolRunner()
         let network = NetworkStatus()
         let notifier = UserNotifier(log: log)
+        let media = MediaProcessor(tools: tools)
         let environment = EngineEnvironment(
             clock: SystemClock(),
-            media: MediaProcessor(tools: tools),
+            media: media,
             rules: NameRules(),
             extractor: ContentExtractor(tools: tools),
             naming: AnthropicNamingClient(),
@@ -109,6 +110,7 @@ enum Daemon {
             freeSpace: { FS.freeSpace($0) },
             requiredTools: MediaProcessor.requiredTools,
             resolveTool: { tools.resolve($0) },
+            magickPolicyProblem: { media.policyProblem() },
             isProcessableExtension: { MediaProcessor.isMediaExtension($0) || ContentExtractor.isNameableExtension($0) },
             failpoints: Failpoints.fromEnvironment(),
             log: log

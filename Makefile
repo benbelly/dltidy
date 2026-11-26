@@ -21,6 +21,8 @@ bundle: build
 	mkdir -p "$(BUILD_APP)/Contents/MacOS"
 	cp Support/Info.plist "$(BUILD_APP)/Contents/Info.plist"
 	cp .build/release/dltidy "$(BUILD_APP)/Contents/MacOS/dltidy"
+	mkdir -p "$(BUILD_APP)/Contents/Resources/magick"
+	cp Support/magick/policy.xml "$(BUILD_APP)/Contents/Resources/magick/policy.xml"
 
 sign: bundle
 	KC=$$(Support/make-cert.sh) || exit 1; \

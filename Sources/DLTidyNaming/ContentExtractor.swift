@@ -21,8 +21,6 @@ public struct ContentExtractor: ContentExtracting {
     static let maxImageBytes = 300 * 1024
     static let longEdge = 768
     static let timeoutSeconds: Double = 10
-    /// Images above this many pixels are not decoded (a small file can declare a huge canvas).
-    static let maxImagePixels = 100_000_000
 
     private let tools: any ToolRunning
 
@@ -200,11 +198,13 @@ public struct ContentExtractor: ContentExtracting {
 
     // MARK: Images
 
-    /// True for positive dimensions whose product is at most `maxImagePixels`.
-    static func withinPixelCap(width: Int, height: Int) -> Bool {
-        guard width > 0, height > 0 else { return false }
-        let (area, overflow) = width.multipliedReportingOverflow(by: height)
-        return !overflow && area <= maxImagePixels
+    /// The shared decompression-bomb rule (`ImageLimits`), with the file's size.
+    static func withinPixelCap(width: Int, height: Int, bytes: Int64) -> Bool {
+        ImageLimits.isAcceptable(width: width, height: height, fileBytes: bytes)
+    }
+
+    private static func fileBytes(_ file: URL) -> Int64 {
+        (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
     }
 
     private static func imagePayload(_ file: URL) -> NamingPayload? {
@@ -214,7 +214,7 @@ public struct ContentExtractor: ContentExtracting {
         guard let props = CGImageSourceCopyPropertiesAtIndex(src, 0, sourceOptions) as? [CFString: Any],
               let w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
               let h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
-              withinPixelCap(width: w, height: h) else { return nil }
+              withinPixelCap(width: w, height: h, bytes: fileBytes(file)) else { return nil }
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,   // applies EXIF orientation

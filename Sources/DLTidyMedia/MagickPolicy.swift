@@ -5,10 +5,20 @@ import Foundation
 /// The policy ships as `Support/magick/policy.xml`, copied into the app bundle before signing so the
 /// code signature seals it. A missing or unreadable file fails closed: no `magick` call runs.
 enum MagickPolicy {
-    /// `<app>/Contents/Resources/magick`.
+    /// `<app>/Contents/Resources/magick`, found from the real executable path. `Bundle.main` is not
+    /// used: when the CLI runs through the `~/.local/bin/dltidy` symlink it resolves to that folder.
     static var defaultDirectory: URL {
-        (Bundle.main.resourceURL ?? URL(fileURLWithPath: "/nonexistent", isDirectory: true))
-            .appendingPathComponent("magick", isDirectory: true)
+        var size: UInt32 = 0
+        _ = _NSGetExecutablePath(nil, &size)
+        var buf = [CChar](repeating: 0, count: Int(size))
+        guard _NSGetExecutablePath(&buf, &size) == 0 else {
+            return URL(fileURLWithPath: "/nonexistent/magick", isDirectory: true)
+        }
+        let path = String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        let exe = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        return exe.deletingLastPathComponent()          // Contents/MacOS
+            .deletingLastPathComponent()                // Contents
+            .appendingPathComponent("Resources/magick", isDirectory: true)
     }
 
     /// nil when `directory/policy.xml` is readable and non-empty; otherwise why not.
